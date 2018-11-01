@@ -2,7 +2,9 @@ package storage
 
 import (
 	"fmt"
+	"github.com/ncw/directio"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -21,16 +23,25 @@ func (v *Volume) load(alsoLoadIndex bool, createDatIfMissing bool, needleMapKind
 	fileName := v.FileName()
 	alreadyHasSuperBlock := false
 
+	v.useDirectIO = true
 	if exists, canRead, canWrite, modifiedTime, fileSize := checkFile(fileName + ".dat"); exists {
 		if !canRead {
 			return fmt.Errorf("cannot read Volume Data file %s.dat", fileName)
 		}
 		if canWrite {
-			v.dataFile, e = os.OpenFile(fileName+".dat", os.O_RDWR|os.O_CREATE, 0644)
+			if v.useDirectIO {
+				v.dataFile, e = directio.OpenFile(fileName+".dat", os.O_RDWR|os.O_CREATE, 0644)
+			} else {
+				v.dataFile, e = os.OpenFile(fileName+".dat", os.O_RDWR|os.O_CREATE, 0644)
+			}
 			v.lastModifiedTime = uint64(modifiedTime.Unix())
 		} else {
 			glog.V(0).Infoln("opening " + fileName + ".dat in READONLY mode")
-			v.dataFile, e = os.Open(fileName + ".dat")
+			if v.useDirectIO {
+				v.dataFile, e = directio.OpenFile(fileName + ".dat", syscall.O_DIRECT |syscall.O_RDWR, 0644)
+			} else {
+				v.dataFile, e = os.OpenFile(fileName + ".dat", syscall.O_DIRECT |syscall.O_RDWR, 0644)
+			}
 			v.readOnly = true
 		}
 		if fileSize >= _SuperBlockSize {
@@ -38,7 +49,7 @@ func (v *Volume) load(alsoLoadIndex bool, createDatIfMissing bool, needleMapKind
 		}
 	} else {
 		if createDatIfMissing {
-			v.dataFile, e = createVolumeFile(fileName+".dat", preallocate)
+			v.dataFile, e = createVolumeFile(fileName+".dat", preallocate, v.useDirectIO)
 		} else {
 			return fmt.Errorf("Volume Data file %s.dat does not exist.", fileName)
 		}

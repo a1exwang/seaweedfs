@@ -29,7 +29,7 @@ func CheckVolumeDataIntegrity(v *Volume, indexFile *os.File) error {
 	if offset == 0 || size == TombstoneFileSize {
 		return nil
 	}
-	if e = verifyNeedleIntegrity(v.dataFile, v.Version(), int64(offset)*NeedlePaddingSize, key, size); e != nil {
+	if e = verifyNeedleIntegrity(v.dataFile, v.Version(), int64(offset)*NeedlePaddingSize, key, size, v.useDirectIO); e != nil {
 		return fmt.Errorf("verifyNeedleIntegrity %s failed: %v", indexFile.Name(), e)
 	}
 
@@ -55,9 +55,9 @@ func readIndexEntryAtOffset(indexFile *os.File, offset int64) (bytes []byte, err
 	return
 }
 
-func verifyNeedleIntegrity(datFile *os.File, v Version, offset int64, key NeedleId, size uint32) error {
+func verifyNeedleIntegrity(datFile *os.File, v Version, offset int64, key NeedleId, size uint32, useDirectIO bool) error {
 	n := new(Needle)
-	err := n.ReadData(datFile, offset, size, v)
+	err := n.ReadData(datFile, offset, size, v, useDirectIO)
 	if err != nil {
 		return err
 	}

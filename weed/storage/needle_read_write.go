@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"github.com/ncw/directio"
 	"io"
 	"os"
 
@@ -158,14 +159,93 @@ func (n *Needle) Append(w io.Writer, version Version) (size uint32, actualSize i
 	return 0, 0, fmt.Errorf("Unsupported Version! (%d)", version)
 }
 
-func ReadNeedleBlob(r *os.File, offset int64, size uint32, version Version) (dataSlice []byte, err error) {
-	dataSlice = make([]byte, int(getActualSize(size, version)))
-	_, err = r.ReadAt(dataSlice, offset)
+func ReadAt(r *os.File, offset, size int64, useDirectIO bool) (dataSlice []byte, err error){
+	if useDirectIO {
+		return readAtDirectIO(r, offset, size)
+	} else {
+		dataSlice := make([]byte, size)
+		_, err = r.ReadAt(dataSlice, offset)
+		if err != nil {
+			return nil, err
+		}
+		return dataSlice, nil
+	}
+}
+
+func readAtDirectIO(r *os.File, offset, size int64) (dataSlice []byte, err error) {
+	newOffset, newSize := util.AlignForDirectIO(offset, size, directio.BlockSize)
+
+	dataSliceAligned := directio.AlignedBlock(int(newSize))
+	unusedRead := offset-newOffset
+
+	_, err = r.ReadAt(dataSliceAligned, newOffset)
+	if err != nil {
+		if err == io.EOF {
+			// do nothing
+		} else {
+			s, errStat := r.Stat()
+			if errStat != nil {
+				err = errStat
+				return
+			} else {
+				fmt.Printf("dataSlice: %p\ndataSliceAligned %p\nactualSize: %x\noffset: %x\nnewOffset %x\nunusedRead %x\nnewSize %x\nfileSize: %x\n", &dataSliceAligned[0], &dataSliceAligned[0], size, offset, newOffset, unusedRead, newSize, s.Size())
+				return nil, err
+			}
+		}
+	}
+
+	dataSlice = dataSliceAligned[unusedRead:unusedRead+int64(size)]
+	return dataSlice, nil
+}
+
+func WriteAtDirectIO(r *os.File, offset int64, dataSlice []byte) (actualWrite int64, err error) {
+	size := len(dataSlice)
+	newOffset, newSize := util.AlignForDirectIO(offset, int64(size), directio.BlockSize)
+
+	dataSliceAligned := directio.AlignedBlock(int(newSize))
+	unusedRead := offset-newOffset
+
+	n, err := r.ReadAt(dataSliceAligned, newOffset)
+	if err != nil {
+		if err == io.EOF {
+			// do nothing
+			for i := n; i < len(dataSliceAligned); i++ {
+				dataSliceAligned[i] = 0
+			}
+		} else {
+			s, errStat := r.Stat()
+			if errStat != nil {
+				err = errStat
+				return
+			} else {
+				fmt.Printf("dataSlice: %p\ndataSliceAligned %p\nactualSize: %x\noffset: %x\nnewOffset %x\nunusedRead %x\nnewSize %x\nfileSize: %x\n", &dataSliceAligned[0], &dataSliceAligned[0], size, offset, newOffset, unusedRead, newSize, s.Size())
+				return 0, err
+			}
+		}
+	}
+
+	// FIXME: may not be atomic
+	copy(dataSliceAligned[unusedRead:size], dataSlice)
+	_, err = r.WriteAt(dataSliceAligned, newOffset)
+	if err != nil {
+		if err == io.EOF {
+			// do nothing
+		} else {
+			return 0, err
+		}
+	}
+
+	return int64(len(dataSliceAligned)), nil
+}
+
+func ReadNeedleBlob(r *os.File, offset int64, size uint32, version Version, useDirectIO bool) (dataSlice []byte, err error) {
+	actualSize := getActualSize(size, version)
+	dataSlice, err = ReadAt(r, offset, actualSize, useDirectIO)
 	return dataSlice, err
 }
 
-func (n *Needle) ReadData(r *os.File, offset int64, size uint32, version Version) (err error) {
-	bytes, err := ReadNeedleBlob(r, offset, size, version)
+func (n *Needle) ReadData(r *os.File, offset int64, size uint32, version Version, useDirectIO bool) (err error) {
+	bytes, err := ReadNeedleBlob(r, offset, size, version, useDirectIO)
 	if err != nil {
 		return err
 	}
@@ -245,12 +325,11 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) {
 	}
 }
 
-func ReadNeedleHeader(r *os.File, version Version, offset int64) (n *Needle, bodyLength int64, err error) {
+func ReadNeedleHeader(r *os.File, version Version, offset int64, useDirectIO bool) (n *Needle, bodyLength int64, err error) {
 	n = new(Needle)
 	if version == Version1 || version == Version2 || version == Version3 {
-		bytes := make([]byte, NeedleEntrySize)
-		var count int
-		count, err = r.ReadAt(bytes, offset)
+		bytes, err := ReadAt(r, offset, NeedleEntrySize, useDirectIO)
+		count := len(bytes)
 		if count <= 0 || err != nil {
 			return nil, 0, err
 		}
@@ -277,21 +356,21 @@ func NeedleBodyLength(needleSize uint32, version Version) int64 {
 
 //n should be a needle already read the header
 //the input stream will read until next file entry
-func (n *Needle) ReadNeedleBody(r *os.File, version Version, offset int64, bodyLength int64) (err error) {
+func (n *Needle) ReadNeedleBody(r *os.File, version Version, offset int64, bodyLength int64, useDirectIO bool) (err error) {
 	if bodyLength <= 0 {
 		return nil
 	}
 	switch version {
 	case Version1:
-		bytes := make([]byte, bodyLength)
-		if _, err = r.ReadAt(bytes, offset); err != nil {
+		var bytes []byte
+		if bytes, err = ReadAt(r, offset, bodyLength, useDirectIO); err != nil {
 			return
 		}
 		n.Data = bytes[:n.Size]
 		n.Checksum = NewCRC(n.Data)
 	case Version2, Version3:
-		bytes := make([]byte, bodyLength)
-		if _, err = r.ReadAt(bytes, offset); err != nil {
+		var bytes [] byte
+		if bytes, err = ReadAt(r, offset, bodyLength, useDirectIO); err != nil {
 			return
 		}
 		n.readNeedleDataVersion2(bytes[0:n.Size])

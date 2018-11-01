@@ -26,6 +26,8 @@ type Volume struct {
 
 	lastCompactIndexOffset uint64
 	lastCompactRevision    uint16
+
+	useDirectIO bool
 }
 
 func NewVolume(dirname string, collection string, id VolumeId, needleMapKind NeedleMapType, replicaPlacement *ReplicaPlacement, ttl *TTL, preallocate int64) (v *Volume, e error) {
@@ -50,6 +52,10 @@ func (v *Volume) FileName() (fileName string) {
 }
 func (v *Volume) DataFile() *os.File {
 	return v.dataFile
+}
+
+func (v *Volume) UseDirectIO() bool {
+	return v.useDirectIO
 }
 
 func (v *Volume) Version() Version {

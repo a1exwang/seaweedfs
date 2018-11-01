@@ -200,7 +200,7 @@ func (v *Volume) makeupDiff(newDatFileName, newIdxFileName, oldDatFileName, oldI
 			//even the needle cache in memory is hit, the need_bytes is correct
 			glog.V(4).Infof("file %d offset %d size %d", key, int64(incre_idx_entry.offset)*NeedlePaddingSize, incre_idx_entry.size)
 			var needle_bytes []byte
-			needle_bytes, err = ReadNeedleBlob(oldDatFile, int64(incre_idx_entry.offset)*NeedlePaddingSize, incre_idx_entry.size, v.Version())
+			needle_bytes, err = ReadNeedleBlob(oldDatFile, int64(incre_idx_entry.offset)*NeedlePaddingSize, incre_idx_entry.size, v.Version(), v.useDirectIO)
 			if err != nil {
 				return fmt.Errorf("ReadNeedleBlob %s key %d offset %d size %d failed: %v", oldDatFile.Name(), key, int64(incre_idx_entry.offset)*NeedlePaddingSize, incre_idx_entry.size, err)
 			}
@@ -233,7 +233,7 @@ func (v *Volume) copyDataAndGenerateIndexFile(dstName, idxName string, prealloca
 	var (
 		dst, idx *os.File
 	)
-	if dst, err = createVolumeFile(dstName, preallocate); err != nil {
+	if dst, err = createVolumeFile(dstName, preallocate, v.useDirectIO); err != nil {
 		return
 	}
 	defer dst.Close()
@@ -315,7 +315,7 @@ func (v *Volume) copyDataBasedOnIndexFile(dstName, idxName string) (err error) {
 		}
 
 		n := new(Needle)
-		n.ReadData(v.dataFile, int64(offset)*NeedlePaddingSize, size, v.Version())
+		n.ReadData(v.dataFile, int64(offset)*NeedlePaddingSize, size, v.Version(), v.useDirectIO)
 
 		if n.HasTtl() && now >= n.LastModified+uint64(v.Ttl.Minutes()*60) {
 			return nil

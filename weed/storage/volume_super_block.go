@@ -2,7 +2,9 @@ package storage
 
 import (
 	"fmt"
+	"github.com/ncw/directio"
 	"os"
+	"unsafe"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
@@ -76,12 +78,24 @@ func (v *Volume) maybeWriteSuperBlock() error {
 	}
 	if stat.Size() == 0 {
 		v.SuperBlock.version = CurrentVersion
-		_, e = v.dataFile.Write(v.SuperBlock.Bytes())
+
+		if v.useDirectIO {
+			_, e = WriteAtDirectIO(v.dataFile, 0, v.SuperBlock.Bytes())
+		} else {
+			_, e = v.dataFile.Write(v.SuperBlock.Bytes())
+		}
 		if e != nil && os.IsPermission(e) {
 			//read-only, but zero length - recreate it!
-			if v.dataFile, e = os.Create(v.dataFile.Name()); e == nil {
-				if _, e = v.dataFile.Write(v.SuperBlock.Bytes()); e == nil {
-					v.readOnly = false
+			if v.useDirectIO {
+				v.dataFile, e = directio.OpenFile(v.dataFile.Name(), os.O_CREATE, 0644)
+			} else {
+				v.dataFile, e = os.Create(v.dataFile.Name())
+			}
+			if e == nil {
+				if v.useDirectIO {
+					_, e = WriteAtDirectIO(v.dataFile, 0, v.SuperBlock.Bytes())
+				} else {
+					_, e = v.dataFile.Write(v.SuperBlock.Bytes())
 				}
 			}
 		}
@@ -100,11 +114,23 @@ func ReadSuperBlock(dataFile *os.File) (superBlock SuperBlock, err error) {
 		err = fmt.Errorf("cannot seek to the beginning of %s: %v", dataFile.Name(), err)
 		return
 	}
+
+	headerAligned := make([]byte, 4096)
 	header := make([]byte, _SuperBlockSize)
-	if _, e := dataFile.Read(header); e != nil {
+	headerAligned[0] = 123
+	headerAligned[1] = 0
+	headerAligned[2] = 0
+	headerAligned[3] = 0
+	pt := unsafe.Pointer(&headerAligned[0])
+	uptv := *(*uint64)(pt)
+	fmt.Printf("upt %p, uptv %d\n", headerAligned, uptv)
+
+	if _, e := dataFile.Read(headerAligned); e != nil {
 		err = fmt.Errorf("cannot read volume %s super block: %v", dataFile.Name(), e)
 		return
 	}
+	copy(header, headerAligned)
+
 	superBlock.version = Version(header[0])
 	if superBlock.ReplicaPlacement, err = NewReplicaPlacementFromByte(header[1]); err != nil {
 		err = fmt.Errorf("cannot read replica type: %s", err.Error())

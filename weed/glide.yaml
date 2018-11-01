@@ -42,3 +42,5 @@ import:
   subpackages:
   - peer
   - reflection
+- package: github.com/ncw/directio
+  version: ~1.0.4

@@ -30,3 +30,25 @@ func GetFileSize(file *os.File) (size int64, err error) {
 	}
 	return
 }
+
+func AlignRight(offset, alignment int64) int64 {
+	if offset % alignment == 0 {
+		return offset
+	}
+	return offset - offset % alignment + alignment
+}
+
+func AlignLeft(offset, alignment int64) int64 {
+	if offset % alignment == 0 {
+		return offset
+	}
+	return offset - offset % alignment
+}
+
+func AlignForDirectIO(offset, size, alignment int64) (newOffset, newSize int64) {
+	newStart := AlignLeft(offset, alignment)
+	newEnd := AlignRight(offset + size, alignment)
+	newOffset = newStart
+	newSize = newEnd - newStart
+	return
+}

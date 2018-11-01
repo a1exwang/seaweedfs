@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/ncw/directio"
 	"io"
 	"os"
 	"time"
@@ -21,7 +22,7 @@ func (v *Volume) isFileUnchanged(n *Needle) bool {
 	nv, ok := v.nm.Get(n.Id)
 	if ok && nv.Offset > 0 {
 		oldNeedle := new(Needle)
-		err := oldNeedle.ReadData(v.dataFile, int64(nv.Offset)*NeedlePaddingSize, nv.Size, v.Version())
+		err := oldNeedle.ReadData(v.dataFile, int64(nv.Offset)*NeedlePaddingSize, nv.Size, v.Version(), v.useDirectIO)
 		if err != nil {
 			glog.V(0).Infof("Failed to check updated file %v", err)
 			return false
@@ -96,22 +97,48 @@ func (v *Volume) writeNeedle(n *Needle) (size uint32, err error) {
 		return
 	}
 
-	//ensure file writing starting from aligned positions
-	if offset%NeedlePaddingSize != 0 {
-		offset = offset + (NeedlePaddingSize - offset%NeedlePaddingSize)
-		if offset, err = v.dataFile.Seek(offset, 0); err != nil {
-			glog.V(0).Infof("failed to align in datafile %s: %v", v.dataFile.Name(), err)
+	if v.useDirectIO {
+		buffer := bytes.NewBuffer(make([]byte, 0))
+		if offset % directio.BlockSize != 0 {
+			err = fmt.Errorf("dataFile corrupted, dataFile must align to %d bytes when using direct IO", directio.BlockSize)
+			return
+		}
+		size, _, err = n.Append(buffer, v.Version())
+		if err != nil {
+			if e := v.dataFile.Truncate(offset); e != nil {
+				err = fmt.Errorf("%s\ncannot truncate %s: %v", err, v.dataFile.Name(), e)
+			}
+			return
+		}
+
+		n.AppendAtNs = uint64(time.Now().UnixNano())
+		_, err = WriteAtDirectIO(v.dataFile, offset, buffer.Bytes())
+		if err != nil {
+			glog.Errorf("Failed to write to dataFile '%s', err=", v.dataFile.Name(), err)
+			if e := v.dataFile.Truncate(offset); e != nil {
+				err = fmt.Errorf("%s\ncannot truncate %s: %v", err, v.dataFile.Name(), e)
+			}
+			return
+		}
+	} else {
+		//ensure file writing starting from aligned positions
+		if offset%NeedlePaddingSize != 0 {
+			offset = offset + (NeedlePaddingSize - offset%NeedlePaddingSize)
+			if offset, err = v.dataFile.Seek(offset, 0); err != nil {
+				glog.V(0).Infof("failed to align in datafile %s: %v", v.dataFile.Name(), err)
+				return
+			}
+		}
+
+		n.AppendAtNs = uint64(time.Now().UnixNano())
+		if size, _, err = n.Append(v.dataFile, v.Version()); err != nil {
+			if e := v.dataFile.Truncate(offset); e != nil {
+				err = fmt.Errorf("%s\ncannot truncate %s: %v", err, v.dataFile.Name(), e)
+			}
 			return
 		}
 	}
 
-	n.AppendAtNs = uint64(time.Now().UnixNano())
-	if size, _, err = n.Append(v.dataFile, v.Version()); err != nil {
-		if e := v.dataFile.Truncate(offset); e != nil {
-			err = fmt.Errorf("%s\ncannot truncate %s: %v", err, v.dataFile.Name(), e)
-		}
-		return
-	}
 
 	nv, ok := v.nm.Get(n.Id)
 	if !ok || int64(nv.Offset)*NeedlePaddingSize < offset {
@@ -160,7 +187,7 @@ func (v *Volume) readNeedle(n *Needle) (int, error) {
 	if nv.Size == TombstoneFileSize {
 		return -1, errors.New("Already Deleted")
 	}
-	err := n.ReadData(v.dataFile, int64(nv.Offset)*NeedlePaddingSize, nv.Size, v.Version())
+	err := n.ReadData(v.dataFile, int64(nv.Offset)*NeedlePaddingSize, nv.Size, v.Version(), v.useDirectIO)
 	if err != nil {
 		return 0, err
 	}
@@ -197,17 +224,17 @@ func ScanVolumeFile(dirname string, collection string, id VolumeId,
 	version := v.Version()
 
 	offset := int64(v.SuperBlock.BlockSize())
-	n, rest, e := ReadNeedleHeader(v.dataFile, version, offset)
+	n, rest, e := ReadNeedleHeader(v.dataFile, version, offset, v.useDirectIO)
 	if e != nil {
 		err = fmt.Errorf("cannot read needle header: %v", e)
 		return
 	}
 	for n != nil {
 		if readNeedleBody {
-			if err = n.ReadNeedleBody(v.dataFile, version, offset+NeedleEntrySize, rest); err != nil {
+			if err = n.ReadNeedleBody(v.dataFile, version, offset+NeedleEntrySize, rest, v.useDirectIO); err != nil {
 				glog.V(0).Infof("cannot read needle body: %v", err)
-				//err = fmt.Errorf("cannot read needle body: %v", err)
-				//return
+				err = fmt.Errorf("cannot read needle body: %v", err)
+				return
 			}
 		}
 		err = visitNeedle(n, offset)
@@ -219,7 +246,7 @@ func ScanVolumeFile(dirname string, collection string, id VolumeId,
 		}
 		offset += NeedleEntrySize + rest
 		glog.V(4).Infof("==> new entry offset %d", offset)
-		if n, rest, err = ReadNeedleHeader(v.dataFile, version, offset); err != nil {
+		if n, rest, err = ReadNeedleHeader(v.dataFile, version, offset, v.useDirectIO); err != nil {
 			if err == io.EOF {
 				return nil
 			}
